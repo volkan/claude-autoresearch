@@ -1,0 +1,40 @@
+{
+  "skill_name": "autoresearch",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "optimize my test suite speed in a loop",
+      "should_trigger": true
+    },
+    {
+      "id": 2,
+      "prompt": "set up autoresearch for bundle size reduction",
+      "should_trigger": true
+    },
+    {
+      "id": 3,
+      "prompt": "run experiments to find the fastest build configuration",
+      "should_trigger": true
+    },
+    {
+      "id": 4,
+      "prompt": "start benchmark optimization for LLM training loss",
+      "should_trigger": true
+    },
+    {
+      "id": 5,
+      "prompt": "help me write a React component",
+      "should_trigger": false
+    },
+    {
+      "id": 6,
+      "prompt": "explain how this authentication middleware works",
+      "should_trigger": false
+    },
+    {
+      "id": 7,
+      "prompt": "autoresearch: optimize Lighthouse performance score",
+      "should_trigger": true
+    }
+  ]
+}
