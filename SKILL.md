@@ -13,28 +13,57 @@ This skill uses bundled shell scripts at `${CLAUDE_SKILL_DIR}/scripts/` to handl
 
 ## Setup
 
-### 1. Gather Requirements
+Setup has three phases. **Do not skip the confirmation checkpoints.**
 
-Ask the user (or infer from context):
-- **Goal**: What are we optimizing? (e.g. "test speed", "bundle size", "training loss")
-- **Command**: What runs the benchmark? (e.g. `pnpm test`, `./build.sh`)
-- **Metric**: Primary metric name, unit, and direction (lower/higher is better)
-- **Files in scope**: Which files may be modified
-- **Constraints**: Hard rules (tests must pass, no new deps, etc.)
+### Phase 1: Discovery (read-only, no codebase changes)
 
-If the user passes `$ARGUMENTS`, use it as the goal and infer the rest from context.
+#### 1. Parse the Goal
 
-### 2. Create Branch
+If the user passes `$ARGUMENTS`, use it as the goal. Otherwise ask.
+
+#### 2. Research the Codebase
+
+Understand the workload deeply before proposing anything:
+- Read files in scope and related files
+- Find existing test/build/benchmark commands (grep for scripts, package.json, Makefile, etc.)
+- Run the candidate benchmark command once to see what happens (output format, timing, pass/fail)
+- Check for existing CI scripts, test configs, or performance baselines
+
+Be thorough — wrong setup wastes every future loop iteration.
+
+#### 3. Present Setup Plan
+
+Show the user a summary of what you found and what you propose:
+
+```
+## Autoresearch Setup
+- **Goal**: <what we're optimizing>
+- **Benchmark command**: `<exact command>`
+- **Primary metric**: <name> (<unit>, <lower|higher> is better)
+- **Files in scope**: <directories/files that may be modified>
+- **Constraints**: <hard rules — tests must pass, etc.>
+- **Checks command**: `<validation command, if any>`
+
+Does this look right? I'll do one demo run to establish the baseline.
+```
+
+#### 4. Wait for User Confirmation
+
+**Stop and wait.** Do not proceed until the user confirms the setup plan. If they request changes, adjust and re-present.
+
+### Phase 2: Validation (create files, demo run)
+
+#### 5. Create Branch
 
 ```bash
 git checkout -b autoresearch/<goal-slug>-$(date +%Y-%m-%d)
 ```
 
-### 3. Read Source Files
+#### 6. Read Source Files
 
-Understand the workload deeply before writing anything. Read every file in scope.
+Read every file in scope to build deep understanding before writing session files.
 
-### 4. Create Session Files
+#### 7. Create Session Files
 
 **autoresearch.md** — The heart of the session. See [templates](references/templates.md) for the full template. A fresh agent with no context should be able to read this file and run the loop.
 
@@ -42,7 +71,7 @@ Understand the workload deeply before writing anything. Read every file in scope
 
 **autoresearch.checks.sh** (optional) — Only create when constraints require correctness validation (tests, types, lint). Runs after every passing benchmark. Failures block `keep`.
 
-### 5. Initialize Experiment
+#### 8. Initialize Experiment
 
 ```bash
 bash ${CLAUDE_SKILL_DIR}/scripts/init_experiment.sh \
@@ -50,14 +79,49 @@ bash ${CLAUDE_SKILL_DIR}/scripts/init_experiment.sh \
   "$(pwd)/autoresearch.jsonl"
 ```
 
-### 6. Commit Setup & Run Baseline
+#### 9. Run Demo
+
+Execute one baseline run to validate the setup works end-to-end:
+
+```bash
+bash ${CLAUDE_SKILL_DIR}/scripts/run_experiment.sh \
+  "./autoresearch.sh" 600 "$(pwd)"
+```
+
+#### 10. Show Demo Results
+
+Present the baseline results to the user:
+
+```
+## Demo Run Complete
+- Benchmark: ✓/✗ (exit code)
+- Baseline metric: <name> = <value> <unit>
+- Duration: <N.N>s
+- Checks: ✓/✗/skipped
+
+Ready to start the autonomous loop? I'll keep optimizing until you stop me.
+```
+
+If the demo failed (crash, checks fail, unexpected output), diagnose and fix the setup files before re-running. Do not ask the user to confirm a broken setup.
+
+#### 11. Wait for User Confirmation
+
+**Stop and wait.** Do not enter the autonomous loop until the user explicitly confirms.
+
+### Phase 3: Enter Autonomous Loop (on confirmation)
+
+#### 12. Commit Setup & Log Baseline
 
 ```bash
 git add autoresearch.md autoresearch.sh autoresearch.checks.sh autoresearch.config.json 2>/dev/null; git add autoresearch.jsonl
 git commit -m "autoresearch: setup session files"
 ```
 
-Then immediately run the baseline and start looping.
+Log the demo run as run #1 (the baseline).
+
+#### 13. Start Looping
+
+Enter the experiment loop below. From this point: **NEVER STOP.**
 
 ## The Experiment Loop
 
@@ -116,7 +180,7 @@ Go back to Step 1. **NEVER STOP.**
 
 ## Loop Rules
 
-**LOOP FOREVER.** Never ask "should I continue?" — the user expects autonomous work.
+**LOOP FOREVER.** Never ask "should I continue?" — the user expects autonomous work. (This applies only after the Phase 2 confirmation checkpoint. During setup, always wait for explicit user approval before entering the loop.)
 
 - **Primary metric is king.** Improved → `keep`. Worse/equal → `discard`. Secondary metrics rarely affect this decision.
 - **Simpler is better.** Removing code for equal perf = keep. Ugly complexity for tiny gain = probably discard.
