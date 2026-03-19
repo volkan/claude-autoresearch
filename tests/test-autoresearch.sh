@@ -346,6 +346,132 @@ EOF
 }
 
 # =====================================================================
+# TEST 6: Statistical Confidence Layer
+# =====================================================================
+test_6_cli_confidence() {
+  echo -e "\n${BOLD}Test 6: Statistical Confidence Layer${NC}"
+  setup_test_dir
+
+  CLI="$SCRIPTS_DIR/cli.py"
+
+  # --- Sub-test 1: Clear improvement → strong confidence ---
+  cat > "$TEST_DIR/test1.jsonl" << 'EOF'
+{"type":"config","name":"test","metricName":"duration","metricUnit":"s","bestDirection":"lower"}
+{"run":1,"commit":"aaa","metric":100,"metrics":{},"status":"keep","description":"baseline1","timestamp":1,"segment":0}
+{"run":2,"commit":"bbb","metric":102,"metrics":{},"status":"keep","description":"baseline2","timestamp":2,"segment":0}
+{"run":3,"commit":"ccc","metric":98,"metrics":{},"status":"keep","description":"baseline3","timestamp":3,"segment":0}
+{"run":4,"commit":"ddd","metric":80,"metrics":{},"status":"keep","description":"real improvement","timestamp":4,"segment":0}
+EOF
+
+  STATE1=$(python3 "$CLI" state "$TEST_DIR/test1.jsonl" 2>&1)
+  CONF1=$(echo "$STATE1" | python3 -c "import json,sys; print(json.load(sys.stdin).get('confidence',''))" 2>/dev/null)
+  LABEL1=$(echo "$STATE1" | python3 -c "import json,sys; print(json.load(sys.stdin).get('confidenceLabel',''))" 2>/dev/null)
+  if [[ "$LABEL1" == "strong" ]]; then
+    pass "Clear improvement: label is 'strong' (conf=$CONF1)"
+  else
+    fail "Clear improvement: expected 'strong', got '$LABEL1' (conf=$CONF1)"
+  fi
+
+  # --- Sub-test 2: Marginal in noisy data → weak ---
+  cat > "$TEST_DIR/test2.jsonl" << 'EOF'
+{"type":"config","name":"test","metricName":"duration","metricUnit":"s","bestDirection":"lower"}
+{"run":1,"commit":"aaa","metric":100,"metrics":{},"status":"keep","description":"baseline1","timestamp":1,"segment":0}
+{"run":2,"commit":"bbb","metric":110,"metrics":{},"status":"keep","description":"baseline2","timestamp":2,"segment":0}
+{"run":3,"commit":"ccc","metric":90,"metrics":{},"status":"keep","description":"baseline3","timestamp":3,"segment":0}
+{"run":4,"commit":"ddd","metric":95,"metrics":{},"status":"keep","description":"marginal","timestamp":4,"segment":0}
+EOF
+
+  STATE2=$(python3 "$CLI" state "$TEST_DIR/test2.jsonl" 2>&1)
+  LABEL2=$(echo "$STATE2" | python3 -c "import json,sys; print(json.load(sys.stdin).get('confidenceLabel',''))" 2>/dev/null)
+  if [[ "$LABEL2" == "weak" ]]; then
+    pass "Marginal in noisy data: label is 'weak'"
+  else
+    fail "Marginal in noisy data: expected 'weak', got '$LABEL2'"
+  fi
+
+  # --- Sub-test 3: Deterministic baseline → deterministic ---
+  cat > "$TEST_DIR/test3.jsonl" << 'EOF'
+{"type":"config","name":"test","metricName":"duration","metricUnit":"s","bestDirection":"lower"}
+{"run":1,"commit":"aaa","metric":100,"metrics":{},"status":"keep","description":"baseline1","timestamp":1,"segment":0}
+{"run":2,"commit":"bbb","metric":100,"metrics":{},"status":"keep","description":"baseline2","timestamp":2,"segment":0}
+{"run":3,"commit":"ccc","metric":100,"metrics":{},"status":"keep","description":"baseline3","timestamp":3,"segment":0}
+{"run":4,"commit":"ddd","metric":95,"metrics":{},"status":"keep","description":"improved","timestamp":4,"segment":0}
+EOF
+
+  STATE3=$(python3 "$CLI" state "$TEST_DIR/test3.jsonl" 2>&1)
+  LABEL3=$(echo "$STATE3" | python3 -c "import json,sys; print(json.load(sys.stdin).get('confidenceLabel',''))" 2>/dev/null)
+  METHOD3=$(echo "$STATE3" | python3 -c "import json,sys; print(json.load(sys.stdin).get('confidenceMethod',''))" 2>/dev/null)
+  if [[ "$LABEL3" == "deterministic" ]]; then
+    pass "Deterministic baseline: label is 'deterministic'"
+  else
+    fail "Deterministic baseline: expected 'deterministic', got '$LABEL3' (method=$METHOD3)"
+  fi
+
+  # --- Sub-test 4: Window fallback (baseline MAD=0 but later variance) ---
+  cat > "$TEST_DIR/test4.jsonl" << 'EOF'
+{"type":"config","name":"test","metricName":"duration","metricUnit":"s","bestDirection":"lower"}
+{"run":1,"commit":"aaa","metric":100,"metrics":{},"status":"keep","description":"baseline1","timestamp":1,"segment":0}
+{"run":2,"commit":"bbb","metric":100,"metrics":{},"status":"keep","description":"baseline2","timestamp":2,"segment":0}
+{"run":3,"commit":"ccc","metric":100,"metrics":{},"status":"keep","description":"baseline3","timestamp":3,"segment":0}
+{"run":4,"commit":"ddd","metric":90,"metrics":{},"status":"keep","description":"noise1","timestamp":4,"segment":0}
+{"run":5,"commit":"eee","metric":110,"metrics":{},"status":"keep","description":"noise2","timestamp":5,"segment":0}
+{"run":6,"commit":"fff","metric":80,"metrics":{},"status":"keep","description":"real improvement","timestamp":6,"segment":0}
+EOF
+
+  STATE4=$(python3 "$CLI" state "$TEST_DIR/test4.jsonl" 2>&1)
+  METHOD4=$(echo "$STATE4" | python3 -c "import json,sys; print(json.load(sys.stdin).get('confidenceMethod',''))" 2>/dev/null)
+  if [[ "$METHOD4" == "window_mad" ]]; then
+    pass "Window fallback: method is 'window_mad'"
+  else
+    fail "Window fallback: expected 'window_mad', got '$METHOD4'"
+  fi
+
+  # --- Sub-test 5: Insufficient data (<3 runs) → null ---
+  cat > "$TEST_DIR/test5.jsonl" << 'EOF'
+{"type":"config","name":"test","metricName":"duration","metricUnit":"s","bestDirection":"lower"}
+{"run":1,"commit":"aaa","metric":100,"metrics":{},"status":"keep","description":"baseline1","timestamp":1,"segment":0}
+{"run":2,"commit":"bbb","metric":90,"metrics":{},"status":"keep","description":"baseline2","timestamp":2,"segment":0}
+EOF
+
+  STATE5=$(python3 "$CLI" state "$TEST_DIR/test5.jsonl" 2>&1)
+  CONF5=$(echo "$STATE5" | python3 -c "import json,sys; print(json.load(sys.stdin).get('confidence',''))" 2>/dev/null)
+  if [[ "$CONF5" == "None" ]]; then
+    pass "Insufficient data: confidence is null"
+  else
+    fail "Insufficient data: expected null, got '$CONF5'"
+  fi
+
+  # --- Sub-test 6: State command includes confidence fields ---
+  FIELDS6=$(echo "$STATE1" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+fields = ['confidence', 'noiseFloor', 'confidenceMethod', 'confidenceLabel']
+print('ok' if all(f in d for f in fields) else 'missing')
+" 2>/dev/null)
+  if [[ "$FIELDS6" == "ok" ]]; then
+    pass "State command includes all confidence fields"
+  else
+    fail "State command missing confidence fields"
+  fi
+
+  # --- Sub-test 7: Analyze command includes confidence fields ---
+  ANALYSIS=$(python3 "$CLI" analyze "$TEST_DIR/test1.jsonl" 2>&1)
+  FIELDS7=$(echo "$ANALYSIS" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+fields = ['confidence', 'noiseFloor', 'confidenceMethod', 'confidenceLabel']
+print('ok' if all(f in d for f in fields) else 'missing')
+" 2>/dev/null)
+  if [[ "$FIELDS7" == "ok" ]]; then
+    pass "Analyze command includes all confidence fields"
+  else
+    fail "Analyze command missing confidence fields"
+  fi
+
+  cleanup
+}
+
+# =====================================================================
 # MAIN
 # =====================================================================
 main() {
@@ -367,6 +493,7 @@ main() {
   test_3_keep_discard
   test_4_checks
   test_5_state_reconstruction
+  test_6_cli_confidence
 
   echo -e "\n${BOLD}=========================================${NC}"
   if [[ $TESTS_FAILED -eq 0 ]]; then

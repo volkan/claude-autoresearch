@@ -131,6 +131,63 @@ def compute_strategies(results):
     return strategies
 
 
+def compute_confidence(results, direction):
+    """Confidence that best improvement is real, not noise.
+
+    Uses baseline MAD (first 3 runs = identical code = pure noise).
+    Falls back to sliding-window MAD (last 10) if baseline MAD is 0.
+    Returns (score, noise_floor, method) or (None, None, None).
+    """
+    metrics = [r["metric"] for r in results if isinstance(r.get("metric"), (int, float)) and r["metric"] > 0]
+    if len(metrics) < 3:
+        return None, None, None
+
+    baseline_val = metrics[0]
+    best, _ = find_best(results, direction)
+    if best is None or best == baseline_val:
+        return None, None, None
+
+    def median(xs):
+        s = sorted(xs)
+        n = len(s)
+        return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+    def mad_noise(values):
+        med = median(values)
+        return median([abs(x - med) for x in values]) * 1.4826
+
+    # Try baseline MAD first (runs 1-3, identical code)
+    bl = metrics[:3]
+    nf = mad_noise(bl)
+    method = "baseline_mad"
+
+    # Fallback: sliding window MAD (last 10)
+    if nf < 1e-10:
+        window = metrics[-min(10, len(metrics)):]
+        nf = mad_noise(window)
+        method = "window_mad"
+
+    # Deterministic
+    if nf < 1e-10:
+        return float("inf"), 0.0, "deterministic"
+
+    score = round(abs(best - baseline_val) / nf, 1)
+    return score, round(nf, 6), method
+
+
+def confidence_label(score):
+    """Map confidence score to human label."""
+    if score is None:
+        return None
+    if score == float("inf"):
+        return "deterministic"
+    if score >= 2.0:
+        return "strong"
+    if score >= 1.0:
+        return "moderate"
+    return "weak"
+
+
 def compute_full_state(config, results):
     """Compute complete experiment state."""
     seg, cur = current_segment_results(results)
@@ -141,6 +198,7 @@ def compute_full_state(config, results):
     for r in cur:
         if r["status"] == "keep" and r["metric"] > 0:
             last_keep = r["metric"]
+    conf, nf, method = compute_confidence(cur, direction)
     return {
         "exists": True,
         "name": config.get("name", ""),
@@ -163,6 +221,10 @@ def compute_full_state(config, results):
         "strategies": compute_strategies(cur),
         "lastDescription": cur[-1].get("description", "") if cur else "",
         "lastStatus": cur[-1].get("status", "") if cur else "",
+        "confidence": conf,
+        "noiseFloor": nf,
+        "confidenceMethod": method,
+        "confidenceLabel": confidence_label(conf),
     }
 
 
@@ -270,6 +332,17 @@ def render_dashboard(config, results, scripts_dir="."):
     if chk_fail: parts.append(f"{chk_fail} checks_failed")
     print(f"  {' | '.join(parts)}")
     print(f"  Baseline: {fmt(baseline, unit)} | Best: {fmt(best, unit)} #{best_run} ({delta_pct(best, baseline)})")
+
+    # Confidence
+    conf, nf, method = compute_confidence(cur, direction)
+    if conf is not None:
+        label = confidence_label(conf)
+        if conf == float("inf"):
+            print(f"  Confidence: deterministic ({method}) | Noise floor: 0")
+        else:
+            print(f"  Confidence: {conf}\u00d7 {label} ({method}) | Noise floor: {fmt(nf, unit)}")
+        if label == "weak":
+            print(f"  \u26a0 Low confidence \u2014 improvement may be noise. Re-run to confirm.")
     print()
 
     # Table
@@ -387,6 +460,14 @@ def render_analysis(config, results):
     if not rec:
         rec.append("Keep going. Current approach is productive.")
 
+    # Confidence
+    conf, nf, method = compute_confidence(cur, direction)
+    label = confidence_label(conf)
+    if label == "weak" and sum(1 for r in cur if r["status"] == "discard") > 0:
+        rec.append("Results may be noise. Re-run or try bolder changes.")
+    if label == "deterministic":
+        rec.append("Metric is deterministic. Any change is real signal.")
+
     print(json.dumps({
         "hasData": True, "totalRuns": len(cur),
         "kept": sum(1 for r in cur if r["status"] == "keep"),
@@ -395,6 +476,8 @@ def render_analysis(config, results):
         "nextRunNumber": len(cur) + 1, "velocityTrend": velocity,
         "strategies": strategies, "deadStrategies": dead,
         "recommendation": rec,
+        "confidence": conf, "noiseFloor": nf,
+        "confidenceMethod": method, "confidenceLabel": label,
     }, indent=2))
 
 

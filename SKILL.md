@@ -71,6 +71,10 @@ Parse output: `EXIT_CODE`, `DURATION`, `METRIC name=value`, `TIMED_OUT`, `CHECKS
 
 Compare against **best kept value** (or baseline). Variance-aware: changes within 2× baseline variance are noise → `discard`.
 
+**Confidence score (advisory):** The dashboard shows statistical confidence
+(improvement / noise floor). ≥2.0× = likely real. <1.0× = within noise,
+re-run to confirm. This is advisory — does not change keep/discard.
+
 ### 4. Log Result
 
 ```bash
