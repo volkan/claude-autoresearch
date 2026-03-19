@@ -1,4 +1,4 @@
-"""Tests for the single autoresearch CLI — covers all 11 original test suites."""
+"""Tests for the autoresearch CLI."""
 
 import json
 import os
@@ -325,3 +325,176 @@ class TestAnalyze:
     def test_missing(self):
         out = json.loads(run_cli("analyze", "/nonexistent/file.jsonl"))
         assert out["hasData"] is False
+
+
+# --- find_best: zero and negative metrics ---
+
+class TestFindBestEdgeCases:
+    def test_zero_metric_kept(self, test_dir):
+        """Metrics of 0 should not be excluded (e.g., error_count=0 is perfect)."""
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write("""\
+{"type":"config","name":"t","metricName":"errors","metricUnit":"","bestDirection":"lower"}
+{"run":1,"commit":"a","metric":5,"status":"keep","description":"baseline","segment":0}
+{"run":2,"commit":"b","metric":0,"status":"keep","description":"fixed all","segment":0}
+""")
+        state = json.loads(run_cli("state", jp))
+        assert state["best"] == 0
+        assert state["bestRun"] == 2
+
+    def test_negative_metric_kept(self, test_dir):
+        """Negative metrics should work (e.g., log-loss)."""
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write("""\
+{"type":"config","name":"t","metricName":"log_loss","metricUnit":"","bestDirection":"lower"}
+{"run":1,"commit":"a","metric":-1.5,"status":"keep","description":"baseline","segment":0}
+{"run":2,"commit":"b","metric":-2.0,"status":"keep","description":"worse","segment":0}
+{"run":3,"commit":"c","metric":-0.5,"status":"keep","description":"better","segment":0}
+""")
+        state = json.loads(run_cli("state", jp))
+        assert state["best"] == -2.0
+        assert state["bestRun"] == 2
+
+    def test_higher_direction(self, test_dir):
+        """'higher is better' direction works correctly."""
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write("""\
+{"type":"config","name":"t","metricName":"score","metricUnit":"","bestDirection":"higher"}
+{"run":1,"commit":"a","metric":50,"status":"keep","description":"baseline","segment":0}
+{"run":2,"commit":"b","metric":75,"status":"keep","description":"better","segment":0}
+{"run":3,"commit":"c","metric":60,"status":"discard","description":"worse","segment":0}
+""")
+        state = json.loads(run_cli("state", jp))
+        assert state["best"] == 75
+        assert state["bestRun"] == 2
+        assert state["bestDirection"] == "higher"
+
+
+# --- Multiple segments ---
+
+class TestMultiSegment:
+    def test_reinit_creates_new_segment(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write("""\
+{"type":"config","name":"seg1","metricName":"d","metricUnit":"s","bestDirection":"lower"}
+{"run":1,"commit":"a","metric":10,"status":"keep","description":"b","segment":0}
+{"run":2,"commit":"b","metric":9,"status":"keep","description":"b","segment":0}
+{"type":"config","name":"seg2","metricName":"d","metricUnit":"s","bestDirection":"lower"}
+{"run":1,"commit":"c","metric":20,"status":"keep","description":"new baseline","segment":1}
+{"run":2,"commit":"d","metric":18,"status":"keep","description":"improved","segment":1}
+""")
+        state = json.loads(run_cli("state", jp))
+        assert state["currentSegment"] == 1
+        assert state["totalRuns"] == 2
+        assert state["allRuns"] == 4
+        assert state["baseline"] == 20
+        assert state["best"] == 18
+
+
+# --- Dashboard: strategy column ---
+
+class TestDashboardStrategy:
+    def test_strategy_shown(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write("""\
+{"type":"config","name":"t","metricName":"d","metricUnit":"s","bestDirection":"lower"}
+{"run":1,"commit":"a","metric":10,"status":"keep","description":"baseline","segment":0}
+{"run":2,"commit":"b","metric":9,"status":"keep","description":"opt","segment":0,"strategy":"algorithm"}
+{"run":3,"commit":"r","metric":11,"status":"discard","description":"bad","segment":0,"strategy":"caching"}
+""")
+        out = run_cli("dashboard", jp)
+        assert "strategy" in out.lower()
+        assert "algorithm" in out
+        assert "caching" in out
+
+
+# --- Baseline subcommand ---
+
+class TestBaseline:
+    def test_baseline_runs(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        run_cli("init", "test", "duration", "s", "lower", jp)
+        bench = os.path.join(test_dir, "autoresearch.sh")
+        with open(bench, "w") as f:
+            f.write('#!/bin/bash\nset -euo pipefail\necho "METRIC duration=1.5"\n')
+        os.chmod(bench, 0o755)
+        out = run_cli("baseline", jp, "./autoresearch.sh", test_dir, "3", "10")
+        assert "Baseline Results" in out
+        assert "Median" in out
+        assert "Variance" in out
+        assert "baselineRuns" in out
+        # Check JSONL has baseline entries
+        lines = [l for l in open(jp).readlines() if l.strip() and '"run":' in l]
+        assert len(lines) == 3
+
+    def test_baseline_missing_init(self, test_dir):
+        jp = os.path.join(test_dir, "nonexistent.jsonl")
+        out = run_cli("baseline", jp, "echo hi", test_dir)
+        assert "not found" in out.lower() or "ERROR" in out
+
+    def test_baseline_crash_handling(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        run_cli("init", "test", "duration", "s", "lower", jp)
+        out = run_cli("baseline", jp, "exit 1", test_dir, "3", "5")
+        assert "need at least 2" in out.lower() or "ERROR" in out
+
+
+# --- History subcommand ---
+
+class TestHistory:
+    def test_history_shows_all(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write("""\
+{"type":"config","name":"test speed","metricName":"duration","metricUnit":"s","bestDirection":"lower"}
+{"run":1,"commit":"a1b2c3d","metric":12.3,"status":"keep","description":"baseline","segment":0}
+{"run":2,"commit":"e4f5g6h","metric":11.1,"status":"keep","description":"optimize","segment":0}
+{"run":3,"commit":"rev","metric":14.0,"status":"discard","description":"bad","segment":0}
+""")
+        out = run_cli("history", jp)
+        assert "Full History" in out
+        assert "3 runs" in out
+        assert "baseline" in out
+        assert "optimize" in out
+        assert "bad" in out
+
+    def test_history_missing_file(self):
+        out = run_cli("history", "/nonexistent/file.jsonl")
+        assert "not found" in out.lower() or "No experiments" in out
+
+    def test_history_empty(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write('{"type":"config","name":"t","metricName":"d","metricUnit":"s","bestDirection":"lower"}\n')
+        out = run_cli("history", jp)
+        assert "No experiments" in out
+
+
+# --- Corrupt JSONL resilience ---
+
+class TestCorruptData:
+    def test_corrupt_lines_skipped(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write("""\
+{"type":"config","name":"t","metricName":"d","metricUnit":"s","bestDirection":"lower"}
+THIS IS NOT JSON
+{"run":1,"commit":"a","metric":10,"status":"keep","description":"b","segment":0}
+another corrupt line {{{
+{"run":2,"commit":"b","metric":9,"status":"keep","description":"b","segment":0}
+""")
+        state = json.loads(run_cli("state", jp))
+        assert state["totalRuns"] == 2
+        assert state["best"] == 9
+
+    def test_empty_file(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write("")
+        out = run_cli("dashboard", jp)
+        assert "No experiments" in out

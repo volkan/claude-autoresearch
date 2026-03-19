@@ -2,10 +2,14 @@
 """autoresearch CLI — single entry point for all experiment operations.
 
 Usage:
-  cli.py init   <name> <metric_name> <metric_unit> <direction> <jsonl_path>
-  cli.py run    <command> [timeout] [work_dir] [checks_timeout]
-  cli.py log    <jsonl_path> <run_num> <commit> <metric> <status> <description> <segment> <work_dir> [metrics_json] [strategy]
-  cli.py state  <jsonl_path>
+  cli.py init      <name> <metric_name> <metric_unit> <direction> <jsonl_path>
+  cli.py run       <command> [timeout] [work_dir] [checks_timeout]
+  cli.py baseline  <jsonl_path> <command> <work_dir> [runs] [timeout] [metric_name]
+  cli.py log       <jsonl_path> <run_num> <commit> <metric> <status> <description> <segment> <work_dir> [metrics_json] [strategy]
+  cli.py state     <jsonl_path>
+  cli.py dashboard <jsonl_path>
+  cli.py analyze   <jsonl_path>
+  cli.py history   <jsonl_path>
 """
 
 import json
@@ -95,7 +99,7 @@ def find_best(results, direction):
     """Find best kept metric → (value, run_number)."""
     best, best_run = None, 0
     for i, r in enumerate(results):
-        if r["status"] == "keep" and r["metric"] > 0:
+        if r["status"] == "keep" and isinstance(r.get("metric"), (int, float)):
             if best is None or (
                 (direction == "lower" and r["metric"] < best)
                 or (direction == "higher" and r["metric"] > best)
@@ -138,7 +142,7 @@ def compute_confidence(results, direction):
     Falls back to sliding-window MAD (last 10) if baseline MAD is 0.
     Returns (score, noise_floor, method) or (None, None, None).
     """
-    metrics = [r["metric"] for r in results if isinstance(r.get("metric"), (int, float)) and r["metric"] > 0]
+    metrics = [r["metric"] for r in results if isinstance(r.get("metric"), (int, float))]
     if len(metrics) < 3:
         return None, None, None
 
@@ -196,7 +200,7 @@ def compute_full_state(config, results):
     best, best_run = find_best(cur, direction)
     last_keep = None
     for r in cur:
-        if r["status"] == "keep" and r["metric"] > 0:
+        if r["status"] == "keep" and isinstance(r.get("metric"), (int, float)):
             last_keep = r["metric"]
     conf, nf, method = compute_confidence(cur, direction)
     return {
@@ -346,8 +350,8 @@ def render_dashboard(config, results, scripts_dir="."):
     print()
 
     # Table
-    print(f"  {'#':>3}  {'commit':<9} {'* ' + metric_name:<14} {'delta':>8}  {'status':<15} {'description'}")
-    print(f"  {'\u2500' * 68}")
+    print(f"  {'#':>3}  {'commit':<9} {'* ' + metric_name:<14} {'delta':>8}  {'status':<15} {'strategy':<12} {'description'}")
+    print(f"  {'\u2500' * 80}")
 
     if len(cur) > 10:
         display = [cur[0]] + cur[-9:]
@@ -358,7 +362,7 @@ def render_dashboard(config, results, scripts_dir="."):
     for j, r in enumerate(display):
         idx = 1 if (offset and j == 0) else (len(cur) - 9 + j if offset else j + 1)
         if offset and j == 1:
-            print(f"  {'':>3}  {'...':^9} {'':14} {'':>8}  {'':15} (runs 2-{len(cur) - 9} omitted)")
+            print(f"  {'':>3}  {'...':^9} {'':14} {'':>8}  {'':15} {'':12} (runs 2-{len(cur) - 9} omitted)")
 
         commit = r.get("commit", "?")[:7]
         metric = fmt(r["metric"], unit)
@@ -367,10 +371,11 @@ def render_dashboard(config, results, scripts_dir="."):
             "keep": "\u2713 keep", "discard": "\u2013 discard",
             "crash": "\u2717 crash", "checks_failed": "\u26a0 chk_fail",
         }.get(r["status"], r["status"])
-        desc = r.get("description", "")[:30]
-        print(f"  {idx:>3}  {commit:<9} {metric:<14} {d:>8}  {st:<15} {desc}")
+        strat = r.get("strategy", "")[:11]
+        desc = r.get("description", "")[:24]
+        print(f"  {idx:>3}  {commit:<9} {metric:<14} {d:>8}  {st:<15} {strat:<12} {desc}")
 
-    print(f"  {'\u2500' * 68}")
+    print(f"  {'\u2500' * 80}")
     if total > 10:
         print(f"  (showing last 10 of {total} runs)")
     print()
@@ -392,7 +397,7 @@ def render_dashboard(config, results, scripts_dir="."):
 
     # Anti-stop box
     next_run = total + 1
-    W = 64
+    W = 76
     box = lambda t: f"  \u2551 {t:<{W}} \u2551"
     print(f"  \u2554{'\u2550' * (W + 2)}\u2557")
     print(box(f"NEXT: Run #{next_run}. Make a change, then run the experiment."))
@@ -421,7 +426,7 @@ def render_analysis(config, results):
     best, best_run = find_best(cur, direction)
     last_keep = None
     for r in cur:
-        if r["status"] == "keep" and r["metric"] > 0:
+        if r["status"] == "keep" and isinstance(r.get("metric"), (int, float)):
             last_keep = r["metric"]
 
     # Velocity
@@ -662,6 +667,172 @@ def cmd_analyze(args):
     render_analysis(config, results)
 
 
+def cmd_baseline(args):
+    """Run benchmark N times, compute variance, log baselines, report threshold."""
+    if len(args) < 3:
+        print("Usage: cli.py baseline <jsonl_path> <command> <work_dir> [runs] [timeout] [metric_name]", file=sys.stderr)
+        sys.exit(1)
+    jsonl_path = args[0]
+    command = args[1]
+    work_dir = args[2]
+    runs = int(args[3]) if len(args) > 3 else 3
+    timeout = int(args[4]) if len(args) > 4 else 600
+    metric_name = args[5] if len(args) > 5 else None
+
+    if not os.path.isfile(jsonl_path):
+        print(f"ERROR: {jsonl_path} not found. Run 'init' first.", file=sys.stderr)
+        sys.exit(1)
+
+    config, _ = read_jsonl(jsonl_path)
+    if not metric_name:
+        metric_name = config.get("metricName", "metric")
+    direction = config.get("bestDirection", "lower")
+    unit = config.get("metricUnit", "")
+
+    print(f"Running {runs} baseline measurements...")
+    print(f"Metric: {metric_name} ({unit}, {direction} is better)")
+    print()
+
+    values = []
+    for i in range(1, runs + 1):
+        print(f"--- Baseline run {i}/{runs} ---")
+        cwd = work_dir if work_dir != "." else None
+        start = time.time()
+        try:
+            result = subprocess.run(
+                ["bash", "-c", command], capture_output=True, text=True,
+                timeout=timeout, cwd=cwd,
+            )
+            duration = time.time() - start
+            if result.returncode != 0:
+                output = (result.stdout + "\n" + result.stderr).strip()
+                tail = "\n".join(output.split("\n")[-5:])
+                print(f"  CRASH (exit {result.returncode}): {tail}")
+                continue
+            output = (result.stdout + "\n" + result.stderr).strip()
+            metrics = [l for l in output.split("\n") if l.startswith("METRIC ")]
+            value = None
+            for m in metrics:
+                parts = m.split("=", 1)
+                if len(parts) == 2:
+                    name = parts[0].replace("METRIC ", "").strip()
+                    if name == metric_name:
+                        try:
+                            value = float(parts[1].strip())
+                        except ValueError:
+                            pass
+            if value is not None:
+                values.append(value)
+                print(f"  {metric_name} = {fmt(value, unit)} ({duration:.1f}s)")
+            else:
+                print(f"  WARNING: no METRIC {metric_name}=... found in output")
+        except subprocess.TimeoutExpired:
+            print(f"  TIMEOUT after {timeout}s")
+
+    if len(values) < 2:
+        print(f"\nERROR: need at least 2 successful runs, got {len(values)}", file=sys.stderr)
+        sys.exit(1)
+
+    # Compute variance
+    values_sorted = sorted(values)
+    n = len(values_sorted)
+    median_val = values_sorted[n // 2] if n % 2 else (values_sorted[n // 2 - 1] + values_sorted[n // 2]) / 2
+    spread = values_sorted[-1] - values_sorted[0]
+    variance_pct = (spread / median_val * 100) if median_val != 0 else 0
+    threshold_pct = variance_pct * 2
+    threshold_val = spread * 2
+
+    # Log baseline runs
+    for i, v in enumerate(values):
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            cwd=work_dir, capture_output=True, text=True,
+        ).stdout.strip()
+        entry = {
+            "run": i + 1, "commit": commit, "metric": v,
+            "metrics": {}, "status": "keep", "description": f"baseline {i+1}/{len(values)}",
+            "timestamp": int(time.time() * 1000), "segment": 0,
+        }
+        append_jsonl(jsonl_path, entry)
+
+    # Report
+    print(f"\n{'=' * 50}")
+    print(f"  Baseline Results ({len(values)} runs)")
+    print(f"{'=' * 50}")
+    print(f"  Values: {', '.join(fmt(v, unit) for v in values)}")
+    print(f"  Median: {fmt(median_val, unit)}")
+    print(f"  Range:  {fmt(values_sorted[0], unit)} — {fmt(values_sorted[-1], unit)}")
+    print(f"  Variance: {variance_pct:.2f}%")
+    print(f"  Significance threshold: {threshold_pct:.2f}% ({fmt(threshold_val, unit)})")
+    if variance_pct >= 5:
+        print(f"  High variance — escalation after 7 consecutive discards")
+    else:
+        print(f"  Low variance — escalation after 4 consecutive discards")
+    print(f"  Next run: #{len(values) + 1}")
+    print()
+
+    # Output JSON summary for easy parsing
+    print(json.dumps({
+        "baselineRuns": len(values),
+        "values": values,
+        "median": median_val,
+        "min": values_sorted[0],
+        "max": values_sorted[-1],
+        "variancePct": round(variance_pct, 2),
+        "thresholdPct": round(threshold_pct, 2),
+        "thresholdAbsolute": round(threshold_val, 6),
+        "nextRunNumber": len(values) + 1,
+        "highVariance": variance_pct >= 5,
+    }, indent=2))
+
+
+def cmd_history(args):
+    """Dump all experiment results in a concise format."""
+    if len(args) < 1:
+        print("Usage: cli.py history <jsonl_path>", file=sys.stderr)
+        sys.exit(1)
+    jsonl_path = args[0]
+    if not os.path.isfile(jsonl_path):
+        print("No experiments yet (autoresearch.jsonl not found)")
+        sys.exit(0)
+
+    config, results = read_jsonl(jsonl_path)
+    unit = config.get("metricUnit", "")
+    metric_name = config.get("metricName", "metric")
+    direction = config.get("bestDirection", "lower")
+
+    if not results:
+        print("No experiments logged yet.")
+        return
+
+    _, cur = current_segment_results(results)
+    baseline = cur[0]["metric"] if cur else None
+
+    print(f"\n{'=' * 88}")
+    print(f"  Full History: {config.get('name', 'autoresearch')} ({len(cur)} runs)")
+    print(f"{'=' * 88}")
+    print(f"  {'#':>3}  {'commit':<9} {'* ' + metric_name:<14} {'delta':>8}  {'status':<15} {'strategy':<12} {'description'}")
+    print(f"  {'\u2500' * 84}")
+
+    for i, r in enumerate(cur):
+        idx = i + 1
+        commit = r.get("commit", "?")[:7]
+        metric = fmt(r["metric"], unit)
+        d = delta_pct(r["metric"], baseline) if idx > 1 else "baseline"
+        st = {
+            "keep": "\u2713 keep", "discard": "\u2013 discard",
+            "crash": "\u2717 crash", "checks_failed": "\u26a0 chk_fail",
+        }.get(r["status"], r["status"])
+        strat = r.get("strategy", "")[:11]
+        desc = r.get("description", "")[:30]
+        print(f"  {idx:>3}  {commit:<9} {metric:<14} {d:>8}  {st:<15} {strat:<12} {desc}")
+
+    print(f"  {'\u2500' * 84}")
+    best, best_run = find_best(cur, direction)
+    print(f"  Baseline: {fmt(baseline, unit)} | Best: {fmt(best, unit)} #{best_run} ({delta_pct(best, baseline)})")
+    print()
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -673,6 +844,8 @@ COMMANDS = {
     "state": cmd_state,
     "dashboard": cmd_dashboard,
     "analyze": cmd_analyze,
+    "baseline": cmd_baseline,
+    "history": cmd_history,
 }
 
 def main():

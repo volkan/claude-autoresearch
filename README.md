@@ -48,10 +48,12 @@ Single CLI at `scripts/cli.py` with subcommands — inspired by [pi-autoresearch
 |---------|---------|
 | `cli.py init` | Initialize experiment session (writes config to JSONL) |
 | `cli.py run` | Run benchmark with timing, timeout, and optional checks |
+| `cli.py baseline` | Run N baselines, compute variance and significance threshold |
 | `cli.py log` | Record result, git commit/revert, auto-print dashboard |
 | `cli.py state` | Reconstruct experiment state as JSON |
-| `cli.py dashboard` | Print ASCII dashboard |
+| `cli.py dashboard` | Print ASCII dashboard with strategy column |
 | `cli.py analyze` | Strategy effectiveness analysis with recommendations |
+| `cli.py history` | Full experiment history (all runs, not truncated) |
 
 ## Running Tests
 

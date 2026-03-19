@@ -15,10 +15,12 @@ All operations go through a single CLI at `${CLAUDE_SKILL_DIR}/scripts/cli.py`:
 
 - **`init`** — configure session (name, metric, unit, direction). Call again to re-initialize with a new baseline.
 - **`run`** — runs command, times it, captures output and METRIC lines. Runs `autoresearch.checks.sh` automatically if present.
+- **`baseline`** — runs benchmark N times (default 3), computes variance, logs all baselines, reports significance threshold. Replaces manual 3-run + variance calculation.
 - **`log`** — records result to JSONL. `keep` auto-commits. `discard`/`crash`/`checks_failed` auto-reverts (autoresearch files preserved). **Auto-prints dashboard after every log.**
 - **`state`** — reconstructs current experiment state as JSON.
-- **`dashboard`** — prints ASCII dashboard (also shown automatically after `log`).
+- **`dashboard`** — prints ASCII dashboard with strategy column (also shown automatically after `log`).
 - **`analyze`** — strategy effectiveness analysis with recommendations.
+- **`history`** — full experiment history dump (all runs, not truncated like dashboard).
 
 ## Setup
 
@@ -32,10 +34,11 @@ All operations go through a single CLI at `${CLAUDE_SKILL_DIR}/scripts/cli.py`:
    ```bash
    python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py init \
      "<name>" "<metric_name>" "<unit>" "<lower|higher>" "$(pwd)/autoresearch.jsonl"
-   # Run 3 baselines to measure variance:
-   python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py run "./autoresearch.sh" 600 "$(pwd)"
+   # Run 3 baselines — computes variance and significance threshold automatically:
+   python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py baseline \
+     "$(pwd)/autoresearch.jsonl" "./autoresearch.sh" "$(pwd)" 3 600
    ```
-8. Compute variance = (max - min) / median. Significance threshold = 2× variance. Present to user.
+8. The `baseline` command reports variance and significance threshold. Present to user.
 9. **Wait for user confirmation** to enter autonomous loop.
 10. Commit setup files, then start looping.
 
