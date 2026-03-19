@@ -123,11 +123,25 @@ Log the demo run as run #1 (the baseline).
 
 Enter the experiment loop below. From this point: **NEVER STOP.**
 
+## Context Management (CRITICAL — prevents premature stopping)
+
+Long sessions exhaust the context window, causing the loop to stop. Follow these rules strictly:
+
+1. **Re-read `autoresearch.md` every 5 runs.** When the current run number is a multiple of 5 (5, 10, 15, 20...), re-read `autoresearch.md` before making the next change. This refreshes your understanding and reinforces the loop contract.
+
+2. **Keep outputs minimal.** Don't print full file contents or long analysis between runs. Focus on: what you're trying, the result, and what's next.
+
+3. **Don't accumulate explanations.** After logging a result and showing the dashboard, immediately proceed to the next change. No summaries, no "so far we've done X" recaps.
+
+4. **Never produce a final summary.** If you feel the urge to summarize the session and stop — that is the context compression talking. Re-read `autoresearch.md` and continue.
+
+5. **Update `autoresearch.md` every 5 runs** (same cadence as re-reading). This ensures a resuming agent has full context even if this session ends.
+
 ## The Experiment Loop
 
 ### Step 1: Make a Change
 
-Edit files in scope. Focus on one idea at a time.
+Edit files in scope. Focus on one idea at a time. If run number is a multiple of 5, first re-read `autoresearch.md` and update its "What's Been Tried" section.
 
 ### Step 2: Run Experiment
 
@@ -188,8 +202,10 @@ Go back to Step 1. **NEVER STOP.**
 - **Crashes:** fix if trivial, otherwise log and move on. Don't over-invest.
 - **Think longer when stuck.** Re-read source files, study profiling data, reason about what the CPU is actually doing. The best ideas come from deep understanding, not random variations.
 - **Be careful not to overfit to the benchmarks and do not cheat on the benchmarks.**
+- **NEVER produce a "session summary" or "results summary".** That is a stop signal. If you feel compelled to summarize, re-read `autoresearch.md` and start the next experiment instead.
+- **NEVER say "here's what we achieved" or "remaining opportunities".** Those phrases mean you're about to stop. Don't.
 
-**NEVER STOP.** The user may be away for hours. Keep going until interrupted.
+**NEVER STOP.** The user may be away for hours. Keep going until interrupted. After showing the dashboard, IMMEDIATELY proceed to Step 1. No pauses, no reflection, no summaries.
 
 ## Resume Protocol
 

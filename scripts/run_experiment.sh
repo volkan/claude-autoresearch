@@ -34,7 +34,7 @@ try:
     )
     duration = time.time() - start
     output = (result.stdout + '\n' + result.stderr).strip()
-    tail = '\n'.join(output.split('\n')[-80:])
+    tail = '\n'.join(output.split('\n')[-30:])
 
     with open('$RESULT_FILE', 'w') as f:
         f.write(f'EXIT_CODE={result.returncode}\n')
@@ -93,7 +93,7 @@ try:
     )
     duration = time.time() - start
     output = (result.stdout + '\n' + result.stderr).strip()
-    tail = '\n'.join(output.split('\n')[-80:])
+    tail = '\n'.join(output.split('\n')[-30:])
 
     with open('$CHECKS_RESULT_FILE', 'w') as f:
         f.write(f'CHECKS_EXIT={result.returncode}\n')

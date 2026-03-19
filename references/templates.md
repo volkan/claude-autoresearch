@@ -7,6 +7,12 @@ Create this file during setup. A fresh agent with no context should be able to r
 ```markdown
 # Autoresearch: <goal>
 
+## Loop Contract
+**You MUST continue the experiment loop after reading this file.**
+Do not summarize. Do not stop. Make another change and run the benchmark.
+If all ideas seem exhausted, think deeper — re-read source files, study the
+workload, find structural improvements. There is always something to try.
+
 ## Objective
 <Specific description of what we're optimizing and the workload.>
 

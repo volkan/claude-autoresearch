@@ -102,11 +102,27 @@ hdr = f"  {'#':>3}  {'commit':<9} {'* ' + metric_name:<14} {'delta':>8}  {'statu
 print(hdr)
 print(f"  {'─' * 68}")
 
-for i, r in enumerate(cur):
-    idx = i + 1
+# Truncate to last 10 runs for context savings (keep first run as baseline reference)
+if len(cur) > 10:
+    display = [cur[0]] + cur[-9:]
+    display_offset = True
+else:
+    display = cur
+    display_offset = False
+
+for j, r in enumerate(display):
+    if display_offset:
+        idx = 1 if j == 0 else (len(cur) - 9 + j)
+    else:
+        idx = j + 1
+
+    # Print separator after baseline row when truncated
+    if display_offset and j == 1:
+        print(f"  {'':>3}  {'...':^9} {'':14} {'':>8}  {'':15} (runs 2-{len(cur)-9} omitted)")
+
     commit = r.get("commit", "?")[:7]
     metric = fmt(r["metric"])
-    d = delta_pct(r["metric"], baseline) if i > 0 else "baseline"
+    d = delta_pct(r["metric"], baseline) if idx > 1 else "baseline"
     status = r["status"]
 
     # Status indicators
@@ -125,5 +141,17 @@ for i, r in enumerate(cur):
     print(f"  {idx:>3}  {commit:<9} {metric:<14} {d:>8}  {st:<15} {desc}")
 
 print(f"  {'─' * 68}")
+
+# Context management: only show last 10 runs in detail when table is large
+if total > 10:
+    print(f"  (showing last 10 of {total} runs — older runs omitted to save context)")
+
+print()
+
+# Loop continuation reminder — survives context compression
+print("  ╔══════════════════════════════════════════════════════════════════╗")
+print("  ║  CONTINUE: Go to Step 1. Make another change. Do NOT stop.     ║")
+print("  ║  Re-read autoresearch.md if run# is a multiple of 5.           ║")
+print("  ╚══════════════════════════════════════════════════════════════════╝")
 print()
 PYEOF
