@@ -40,28 +40,28 @@ run experiments to find the fastest build configuration
 
 The skill will ask clarifying questions (or infer from context), create benchmark scripts, initialize tracking, and start looping.
 
-## Scripts
+## Architecture
 
-All scripts live in `scripts/` and are invoked by the skill automatically.
+Single CLI at `scripts/cli.py` with subcommands — inspired by [pi-autoresearch](https://github.com/davebcn87/pi-autoresearch)'s single-file approach:
 
-| Script | Purpose |
-|--------|---------|
-| `init_experiment.sh` | Initialize a new experiment session (writes config to JSONL) |
-| `run_experiment.sh` | Run benchmark with timing, timeout, and optional checks |
-| `log_experiment.sh` | Record result and handle git commit (keep) or revert (discard) |
-| `reconstruct_state.sh` | Parse JSONL and output current experiment state as JSON |
-| `show_dashboard.sh` | Print ASCII dashboard of all experiment results |
+| Command | Purpose |
+|---------|---------|
+| `cli.py init` | Initialize experiment session (writes config to JSONL) |
+| `cli.py run` | Run benchmark with timing, timeout, and optional checks |
+| `cli.py baseline` | Run N baselines, compute variance and significance threshold |
+| `cli.py log` | Record result, git commit/revert, auto-print dashboard |
+| `cli.py state` | Reconstruct experiment state as JSON |
+| `cli.py dashboard` | Print ASCII dashboard with strategy column |
+| `cli.py analyze` | Strategy effectiveness analysis with recommendations |
+| `cli.py history` | Full experiment history (all runs, not truncated) |
 
 ## Running Tests
 
 ```bash
-bash tests/test-autoresearch.sh
+python3 -m pytest tests/ -v
 ```
-
-Runs 5 test suites covering initialization, benchmark execution, git keep/discard, checks integration, and state reconstruction + dashboard rendering.
 
 ## Requirements
 
-- bash
-- python3
+- python3 (3.8+)
 - git

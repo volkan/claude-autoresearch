@@ -2,3 +2,5 @@
 autoresearch.jsonl
 autoresearch.ideas.md
 autoresearch.config.json
+__pycache__/
+.pytest_cache/
