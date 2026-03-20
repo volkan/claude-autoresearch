@@ -9,9 +9,8 @@ Create this file during setup. A fresh agent with no context should be able to r
 
 ## Loop Contract
 **You MUST continue the experiment loop after reading this file.**
-Do not summarize. Do not stop. Make another change and run the benchmark.
-If all ideas seem exhausted, think deeper — re-read source files, study the
-workload, find structural improvements. There is always something to try.
+Do not summarize. Do not stop. Do not ask "should I continue?".
+Make another change and run the benchmark. The human might be asleep.
 
 ## Objective
 <Specific description of what we're optimizing and the workload.>
@@ -31,6 +30,10 @@ workload, find structural improvements. There is always something to try.
 
 ## Constraints
 <Hard rules: tests must pass, no new deps, etc.>
+
+## Simplicity Criterion
+All else being equal, simpler is better. Removing something for equal results
+is a win. A tiny improvement that adds 20 lines of complexity is not worth it.
 
 ## What's Been Tried
 <Update this section as experiments accumulate. Note key wins, dead ends,

@@ -5,127 +5,107 @@ allowed-tools: Bash(*), Read, Write, Edit, Glob, Grep
 argument-hint: "[optimization goal]"
 ---
 
-# Autoresearch
+# autoresearch
 
-Autonomous experiment loop: try ideas, keep what works, discard what doesn't, never stop.
-
-## Tools
-
-All operations go through a single CLI at `${CLAUDE_SKILL_DIR}/scripts/cli.py`:
-
-- **`init`** — configure session (name, metric, unit, direction). Call again to re-initialize with a new baseline.
-- **`run`** — runs command, times it, captures output and METRIC lines. Runs `autoresearch.checks.sh` automatically if present.
-- **`baseline`** — runs benchmark N times (default 3), computes variance, logs all baselines, reports significance threshold. Replaces manual 3-run + variance calculation.
-- **`log`** — records result to JSONL. `keep` auto-commits. `discard`/`crash`/`checks_failed` auto-reverts (autoresearch files preserved). **Auto-prints dashboard after every log.**
-- **`state`** — reconstructs current experiment state as JSON.
-- **`dashboard`** — prints ASCII dashboard with strategy column (also shown automatically after `log`).
-- **`analyze`** — strategy effectiveness analysis with recommendations.
-- **`history`** — full experiment history dump (all runs, not truncated like dashboard).
+This is an experiment loop. You are an autonomous researcher. You try ideas, measure them, keep what works, discard what doesn't, and never stop.
 
 ## Setup
 
-1. Ask (or infer from `$ARGUMENTS`): **Goal**, **Command**, **Metric** (+ direction), **Files in scope**, **Constraints** (hard vs soft).
-2. `git checkout -b autoresearch/<goal>-$(date +%Y-%m-%d)`
-3. Read every source file in scope deeply before writing anything.
-4. Write `autoresearch.md` (session doc — see [template](references/templates.md)) and `autoresearch.sh` (benchmark script).
-5. Optionally write `autoresearch.checks.sh` for correctness validation (tests, types, lint).
-6. **Wait for user confirmation** before proceeding.
-7. Initialize and run baseline:
+To set up a new experiment, work with the user to:
+
+1. **Agree on the goal**: What are we optimizing? What's the metric, and which direction is better (lower/higher)? What command runs the benchmark? What files are in scope? What are the constraints?
+2. **Create the branch**: `git checkout -b autoresearch/<goal>-$(date +%Y-%m-%d)` from current main.
+3. **Read the in-scope files**: Read every file you're allowed to modify, deeply, before writing anything. Understand the codebase.
+4. **Write the session doc**: Create `autoresearch.md` (see [template](references/templates.md)) — a fresh agent with no context should be able to read this file and continue the loop. Also create `autoresearch.sh` (benchmark script that outputs `METRIC name=value` lines).
+5. **Optionally write checks**: If correctness constraints exist (tests must pass, types must check), create `autoresearch.checks.sh`.
+6. **Confirm and go**: Present the setup to the user and get confirmation.
+
+Once you get confirmation, initialize tracking and establish the baseline:
+
+```bash
+python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py init \
+  "<name>" "<metric_name>" "<unit>" "<lower|higher>" "$(pwd)/autoresearch.jsonl"
+python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py baseline \
+  "$(pwd)/autoresearch.jsonl" "./autoresearch.sh" "$(pwd)" 3 600
+```
+
+The baseline command runs the benchmark 3 times, computes variance, and reports the significance threshold. Present results to user, get confirmation, commit setup files, then start looping.
+
+## The experiment loop
+
+LOOP FOREVER:
+
+1. Edit files in scope with an experimental idea. One idea at a time.
+2. Run the experiment:
    ```bash
-   python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py init \
-     "<name>" "<metric_name>" "<unit>" "<lower|higher>" "$(pwd)/autoresearch.jsonl"
-   # Run 3 baselines — computes variance and significance threshold automatically:
-   python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py baseline \
-     "$(pwd)/autoresearch.jsonl" "./autoresearch.sh" "$(pwd)" 3 600
+   python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py run "./autoresearch.sh" 600 "$(pwd)"
    ```
-8. The `baseline` command reports variance and significance threshold. Present to user.
-9. **Wait for user confirmation** to enter autonomous loop.
-10. Commit setup files, then start looping.
+3. Parse the output: `EXIT_CODE`, `DURATION`, `METRIC name=value`, `TIMED_OUT`, `CHECKS_EXIT`.
+4. Determine the status:
+   - If EXIT_CODE != 0 or TIMED_OUT → `crash`
+   - If CHECKS_EXIT != 0 and != skipped → `checks_failed`
+   - If metric improved beyond the significance threshold → `keep`
+   - Otherwise (worse, equal, or within noise) → `discard`
+5. Log the result:
+   ```bash
+   COMMIT=$(git rev-parse --short=7 HEAD)
+   python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py log \
+     "$(pwd)/autoresearch.jsonl" <run_number> "$COMMIT" <metric> \
+     "<status>" "<description>" 0 "$(pwd)" '{"secondary": value}' "<strategy>"
+   ```
+   This auto-commits on keep, auto-reverts on discard/crash/checks_failed (preserving autoresearch files), and prints the dashboard.
+6. Read the dashboard. It tells you the current state and what to do next. Then go to step 1.
 
-## The Experiment Loop
+Tag each experiment with a strategy: `algorithm`, `caching`, `parallelism`, `io`, `removal`, `restructure`, `batching`.
 
-After setup, execute this loop **forever** until the user interrupts:
+## Tools
 
-### 1. Make a Change
+All operations go through `${CLAUDE_SKILL_DIR}/scripts/cli.py`:
 
-Edit files in scope. One idea at a time. Tag your strategy: `algorithm`, `caching`, `parallelism`, `io`, `removal`, `restructure`, `batching`.
+- `init` — configure session
+- `run` — run benchmark with timeout, auto-run checks if present
+- `baseline` — run N baselines, compute variance and significance threshold
+- `log` — record result, auto-commit/revert, print dashboard
+- `state` — current experiment state as JSON
+- `dashboard` — ASCII dashboard
+- `analyze` — strategy effectiveness analysis with recommendations
+- `history` — full run history
+- `recover` — diagnose and fix inconsistent state
 
-**Strategy playbook:**
-- **Unoptimized codebase:** start bold — algorithm replacement, removing unnecessary work, caching, batching. 10× levers before 10%.
-- **Already optimized:** profile first, target the actual bottleneck.
-- Avoid dependency upgrades early — breaking-change risk.
+## What makes a good experiment
 
-### 2. Run Experiment
+**The goal is simple: improve the primary metric.** Everything is fair game within the files in scope.
+
+**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude.
+
+**Do not cheat.** The workload must remain functionally identical before and after your change. If the benchmark does less work, that's not optimization — it's removal. If `autoresearch.checks.sh` exists, it enforces this automatically.
+
+**Strategy**: Start bold. Algorithm replacement, removing unnecessary work, caching, batching — 10x levers before 10%. If the codebase is already optimized, profile first and target the actual bottleneck. Avoid dependency upgrades early (breaking-change risk).
+
+**Crashes**: Use your judgment. If it's something dumb and easy to fix (a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just log it as a crash and move on.
+
+## NEVER STOP
+
+Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". Do NOT produce a summary — that is a stop signal. The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous.
+
+If you run out of ideas, think harder — re-read the source files, re-read `autoresearch.md`, run `cli.py analyze` to see what strategies work, try combining previous near-misses, try more radical changes. The loop runs until the human interrupts you, period.
+
+Every 5 runs, re-read `autoresearch.md` and run `analyze`. Update the "What's Been Tried" section so a future agent can pick up where you left off.
+
+If you hit 4+ consecutive non-keeps (7+ for high-variance metrics), escalate: run `analyze`, re-read all source files from scratch (your mental model is stale), stop dead strategies (0 wins after 3+ attempts), and try something structurally different. Then continue looping.
+
+## Resume protocol
+
+If `autoresearch.jsonl` already exists, you're resuming a previous session:
 
 ```bash
-python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py run "./autoresearch.sh" 600 "$(pwd)"
-```
-
-Parse output: `EXIT_CODE`, `DURATION`, `METRIC name=value`, `TIMED_OUT`, `CHECKS_EXIT`.
-
-### 3. Determine Status
-
-| Condition | Status |
-|-----------|--------|
-| EXIT_CODE != 0 or TIMED_OUT | `crash` |
-| CHECKS_EXIT != 0 and != skipped | `checks_failed` |
-| Metric improved beyond significance threshold | `keep` |
-| Worse, equal, or within noise | `discard` |
-
-Compare against **best kept value** (or baseline). Variance-aware: changes within 2× baseline variance are noise → `discard`.
-
-**Confidence score (advisory):** The dashboard shows statistical confidence
-(improvement / noise floor). ≥2.0× = likely real. <1.0× = within noise,
-re-run to confirm. This is advisory — does not change keep/discard.
-
-### 4. Log Result
-
-```bash
-COMMIT=$(git rev-parse --short=7 HEAD)
-python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py log \
-  "$(pwd)/autoresearch.jsonl" <run_number> "$COMMIT" <metric> \
-  "<status>" "<description>" 0 "$(pwd)" '{"secondary": value}' "<strategy>"
-```
-
-This auto-commits or auto-reverts, then **prints the dashboard**.
-
-### 5. Repeat — go to Step 1. **NEVER STOP.**
-
-## Loop Rules
-
-**LOOP FOREVER.** Never ask "should I continue?" — the user expects autonomous work.
-
-- Primary metric is king. Simpler is better. Don't thrash.
-- **Be careful not to overfit to the benchmarks and do not cheat.**
-- **NEVER produce a summary.** That is a stop signal. Re-read `autoresearch.md` instead.
-- Crashes: fix if trivial, otherwise log and move on.
-
-### Escalation (consecutive discards)
-
-- High-variance (≥5%): escalate after **7** consecutive discards.
-- Low-variance (<5%): escalate after **4** consecutive discards.
-
-When escalating:
-1. Run `python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py analyze "$(pwd)/autoresearch.jsonl"` — check win rates, dead strategies.
-2. Re-read `autoresearch.md` and source files from scratch.
-3. Stop dead strategies (0 wins after 3+ attempts). Try untried categories.
-4. Try a **structurally different** approach.
-
-### Context Management
-
-- **Re-read `autoresearch.md` every 5 runs** and run `analyze`. Update "What's Been Tried" section.
-- Keep outputs minimal. Don't accumulate explanations. No recaps.
-- Never produce a final summary — that's the context compression talking.
-
-## Resume Protocol
-
-If `autoresearch.jsonl` already exists:
-```bash
+python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py recover "$(pwd)/autoresearch.jsonl" "$(pwd)"
 python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py state "$(pwd)/autoresearch.jsonl"
 python3 ${CLAUDE_SKILL_DIR}/scripts/cli.py analyze "$(pwd)/autoresearch.jsonl"
 ```
-Read `autoresearch.md`, check `autoresearch.ideas.md`, `git log --oneline -20`, then continue looping.
 
-## Ideas Backlog
+Read `autoresearch.md`, check `autoresearch.ideas.md`, `git log --oneline -20`, then immediately continue looping. Do not ask the user if they want to continue — they invoked autoresearch, they want you to loop.
+
+## Ideas backlog
 
 Append promising ideas to `autoresearch.ideas.md`. On resume, prune stale entries and experiment with the rest.
