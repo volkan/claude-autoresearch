@@ -10,10 +10,12 @@ Usage:
   cli.py dashboard <jsonl_path>
   cli.py analyze   <jsonl_path>
   cli.py history   <jsonl_path>
+  cli.py recover   <jsonl_path> [work_dir]
 """
 
 import json
 import os
+import shlex
 import signal
 import shutil
 import subprocess
@@ -68,13 +70,19 @@ def _atomic_write(path, content):
     """Write content to file atomically (temp + rename). Prevents corruption."""
     dirn = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(dir=dirn, prefix=".autoresearch-", suffix=".tmp")
+    fd_closed = False
     try:
         os.write(fd, content.encode("utf-8"))
         os.fsync(fd)
         os.close(fd)
+        fd_closed = True
         os.replace(tmp, path)
     except Exception:
-        os.close(fd) if not os.get_inheritable(fd) else None
+        if not fd_closed:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
@@ -567,9 +575,6 @@ def render_analysis(config, results):
     if not rec:
         rec.append("Keep going. Current approach is productive.")
 
-    # Always end with continuation directive
-    rec.append("CONTINUE LOOPING. Do not stop. Do not summarize.")
-
     # Confidence
     conf, nf, method = compute_confidence(cur, direction)
     label = confidence_label(conf)
@@ -577,6 +582,9 @@ def render_analysis(config, results):
         rec.append("Results may be noise. Re-run or try bolder changes.")
     if label == "deterministic":
         rec.append("Metric is deterministic. Any change is real signal.")
+
+    # Always end with continuation directive (must be last)
+    rec.append("CONTINUE LOOPING. Do not stop. Do not summarize.")
 
     print(json.dumps({
         "hasData": True, "totalRuns": len(cur),
@@ -675,7 +683,7 @@ def cmd_run(args):
     if exit_code == 0 and not timed_out and os.path.isfile(checks_file):
         print("\n--- RUNNING CHECKS ---")
         chk_code, chk_dur, chk_out, chk_timeout = _run_subprocess(
-            f"bash {checks_file}", checks_timeout, cwd, "checks"
+            f"bash {shlex.quote(checks_file)}", checks_timeout, cwd, "checks"
         )
         tail_c = "\n".join(chk_out.split("\n")[-10:])
         print(f"CHECKS_EXIT={chk_code}")
@@ -947,10 +955,13 @@ def cmd_recover(args):
         fixes.append("Run: cli.py init to re-initialize")
 
     # Check for orphaned backup files
-    for f in os.listdir(work_dir):
-        if f.startswith(".autoresearch-") and f.endswith(".tmp"):
-            issues.append(f"Orphaned temp file: {f}")
-            fixes.append(f"Remove: {os.path.join(work_dir, f)}")
+    try:
+        for f in os.listdir(work_dir):
+            if f.startswith(".autoresearch-") and f.endswith(".tmp"):
+                issues.append(f"Orphaned temp file: {f}")
+                fixes.append(f"Remove: {os.path.join(work_dir, f)}")
+    except OSError:
+        pass
 
     status = "healthy" if not issues else "issues_found"
     result = {
