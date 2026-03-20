@@ -35,13 +35,6 @@ Make another change and run the benchmark. The human might be asleep.
 All else being equal, simpler is better. Removing something for equal results
 is a win. A tiny improvement that adds 20 lines of complexity is not worth it.
 
-## Do Not Remove
-<List features/behaviors that MUST be preserved. e.g.:>
-- Code coverage generation
-- All existing test cases
-- Logging and reporting output
-- Data validation steps
-
 ## What's Been Tried
 <Update this section as experiments accumulate. Note key wins, dead ends,
 and architectural insights so the agent doesn't repeat failed approaches.>

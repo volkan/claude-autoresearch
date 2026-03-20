@@ -78,14 +78,7 @@ All operations go through `${CLAUDE_SKILL_DIR}/scripts/cli.py`:
 
 **Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude.
 
-**Do not cheat.** Improving the metric by removing features, skipping work, reducing scope, or changing what the benchmark measures is not optimization — it's sabotage. The workload must remain functionally identical before and after your change. If `autoresearch.checks.sh` exists, it enforces this automatically. Examples of cheating:
-- Removing code coverage generation to make tests faster
-- Skipping tests or test cases to reduce runtime
-- Reducing data size, sample count, or iteration count
-- Disabling logging, reporting, or validation steps
-- Caching results from a previous run instead of recomputing
-
-If you're unsure whether a change preserves behavior, it probably doesn't. Check.
+**Do not cheat.** The workload must remain functionally identical before and after your change. If the benchmark does less work, that's not optimization — it's removal. If `autoresearch.checks.sh` exists, it enforces this automatically.
 
 **Strategy**: Start bold. Algorithm replacement, removing unnecessary work, caching, batching — 10x levers before 10%. If the codebase is already optimized, profile first and target the actual bottleneck. Avoid dependency upgrades early (breaking-change risk).
 
