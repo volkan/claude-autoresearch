@@ -10,13 +10,7 @@ Create this file during setup. A fresh agent with no context should be able to r
 ## Loop Contract
 **You MUST continue the experiment loop after reading this file.**
 Do not summarize. Do not stop. Do not ask "should I continue?".
-Make another change and run the benchmark. NOW.
-
-If all ideas seem exhausted, you haven't thought hard enough:
-1. Re-read ALL source files — your cached understanding is wrong
-2. Run `cli.py analyze` — look at what strategies have 0 wins
-3. Try a fundamentally different approach (new algorithm, new data structure)
-4. There is ALWAYS something to try. "I've tried everything" is never true.
+Make another change and run the benchmark. The human might be asleep.
 
 ## Objective
 <Specific description of what we're optimizing and the workload.>
@@ -36,6 +30,10 @@ If all ideas seem exhausted, you haven't thought hard enough:
 
 ## Constraints
 <Hard rules: tests must pass, no new deps, etc.>
+
+## Simplicity Criterion
+All else being equal, simpler is better. Removing something for equal results
+is a win. A tiny improvement that adds 20 lines of complexity is not worth it.
 
 ## What's Been Tried
 <Update this section as experiments accumulate. Note key wins, dead ends,
