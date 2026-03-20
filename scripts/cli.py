@@ -14,6 +14,7 @@ Usage:
 
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -46,41 +47,101 @@ COMMON_STRATEGIES = [
 ]
 
 # ---------------------------------------------------------------------------
+# Resilience helpers
+# ---------------------------------------------------------------------------
+
+def _retry(fn, retries=2, delay=0.5, label="operation"):
+    """Retry a function on failure with exponential backoff."""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(delay * (2 ** attempt))
+    print(f"WARNING: {label} failed after {retries + 1} attempts: {last_err}", file=sys.stderr)
+    raise last_err
+
+
+def _atomic_write(path, content):
+    """Write content to file atomically (temp + rename). Prevents corruption."""
+    dirn = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=dirn, prefix=".autoresearch-", suffix=".tmp")
+    try:
+        os.write(fd, content.encode("utf-8"))
+        os.fsync(fd)
+        os.close(fd)
+        os.replace(tmp, path)
+    except Exception:
+        os.close(fd) if not os.get_inheritable(fd) else None
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def _safe_append(path, line):
+    """Append a line to file with fsync for durability."""
+    with open(path, "a") as f:
+        f.write(line)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _kill_process_tree(proc):
+    """Kill process and all children. Handles zombie processes."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.kill()
+    except (ProcessLookupError, OSError):
+        pass
+
+
+# ---------------------------------------------------------------------------
 # JSONL
 # ---------------------------------------------------------------------------
 
 def read_jsonl(path):
-    """Parse autoresearch.jsonl → (config, results)."""
+    """Parse autoresearch.jsonl → (config, results).
+
+    Resilient: silently skips corrupt lines, handles truncated files.
+    """
     config, results, segment = {}, [], 0
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-                if entry.get("type") == "config":
-                    config = entry
-                    if results:
-                        segment += 1
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
                     continue
-                entry.setdefault("segment", segment)
-                results.append(entry)
-            except json.JSONDecodeError:
-                continue
+                try:
+                    entry = json.loads(line)
+                    if entry.get("type") == "config":
+                        config = entry
+                        if results:
+                            segment += 1
+                        continue
+                    entry.setdefault("segment", segment)
+                    results.append(entry)
+                except json.JSONDecodeError:
+                    continue
+    except (IOError, OSError):
+        pass
     return config, results
 
 
 def append_jsonl(path, entry):
-    """Append a JSON line to file."""
-    with open(path, "a") as f:
-        f.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+    """Append a JSON line to file with fsync for durability."""
+    line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
+    _safe_append(path, line)
 
 
 def write_jsonl(path, entry):
-    """Write a JSON line to a new file."""
-    with open(path, "w") as f:
-        f.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+    """Write a JSON line to a new file atomically."""
+    line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
+    _atomic_write(path, line)
 
 
 # ---------------------------------------------------------------------------
@@ -259,46 +320,60 @@ def delta_pct(value, baseline):
 # ---------------------------------------------------------------------------
 
 def git_commit(work_dir, description, metric):
-    """Stage and commit. Returns SHA or None."""
-    subprocess.run(["git", "add", "-A"], cwd=work_dir, capture_output=True)
-    if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=work_dir, capture_output=True).returncode == 0:
-        print("Git: nothing to commit (working tree clean)")
-        return None
-    msg = f"{description}\n\nResult: {{\"status\":\"keep\",\"metric\":{metric}}}"
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
-    try:
-        tmp.write(msg)
-        tmp.close()
-        r = subprocess.run(["git", "commit", "-F", tmp.name], cwd=work_dir, capture_output=True)
-        if r.returncode != 0:
-            print("WARNING: git commit failed")
+    """Stage and commit with retry. Returns SHA or None."""
+    def _do_commit():
+        subprocess.run(["git", "add", "-A"], cwd=work_dir, capture_output=True, timeout=30)
+        if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=work_dir, capture_output=True, timeout=10).returncode == 0:
+            print("Git: nothing to commit (working tree clean)")
             return None
-    finally:
-        os.unlink(tmp.name)
-    sha = subprocess.run(
-        ["git", "rev-parse", "--short=7", "HEAD"],
-        cwd=work_dir, capture_output=True, text=True,
-    ).stdout.strip()
-    print(f"Git: committed ({sha})")
-    return sha
+        msg = f"{description}\n\nResult: {{\"status\":\"keep\",\"metric\":{metric}}}"
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+        try:
+            tmp.write(msg)
+            tmp.close()
+            r = subprocess.run(["git", "commit", "-F", tmp.name], cwd=work_dir, capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                err_msg = (r.stderr or "").strip()
+                print(f"WARNING: git commit failed: {err_msg}", file=sys.stderr)
+                return None
+        finally:
+            os.unlink(tmp.name)
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            cwd=work_dir, capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        print(f"Git: committed ({sha})")
+        return sha
+
+    try:
+        return _retry(_do_commit, retries=2, delay=0.5, label="git commit")
+    except Exception as e:
+        print(f"ERROR: git commit failed permanently: {e}. Logging continues.", file=sys.stderr)
+        return None
 
 
 def git_revert(work_dir):
-    """Revert all changes, preserving protected files."""
-    backup = tempfile.mkdtemp(prefix="autoresearch-")
+    """Revert all changes, preserving protected files. Retry-safe."""
+    def _do_revert():
+        backup = tempfile.mkdtemp(prefix="autoresearch-")
+        try:
+            for f in PROTECTED_FILES:
+                src = os.path.join(work_dir, f)
+                if os.path.isfile(src):
+                    shutil.copy2(src, os.path.join(backup, f))
+            subprocess.run(["git", "checkout", "--", "."], cwd=work_dir, capture_output=True, timeout=30)
+            subprocess.run(["git", "clean", "-fd"], cwd=work_dir, capture_output=True, timeout=30)
+            for f in PROTECTED_FILES:
+                bak = os.path.join(backup, f)
+                if os.path.isfile(bak):
+                    shutil.move(bak, os.path.join(work_dir, f))
+        finally:
+            shutil.rmtree(backup, ignore_errors=True)
+
     try:
-        for f in PROTECTED_FILES:
-            src = os.path.join(work_dir, f)
-            if os.path.isfile(src):
-                shutil.copy2(src, os.path.join(backup, f))
-        subprocess.run(["git", "checkout", "--", "."], cwd=work_dir, capture_output=True)
-        subprocess.run(["git", "clean", "-fd"], cwd=work_dir, capture_output=True)
-        for f in PROTECTED_FILES:
-            bak = os.path.join(backup, f)
-            if os.path.isfile(bak):
-                shutil.move(bak, os.path.join(work_dir, f))
-    finally:
-        shutil.rmtree(backup, ignore_errors=True)
+        _retry(_do_revert, retries=2, delay=0.5, label="git revert")
+    except Exception as e:
+        print(f"ERROR: git revert failed: {e}. Manual cleanup may be needed.", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +470,17 @@ def render_dashboard(config, results, scripts_dir="."):
     print(f"  Target: next run must be {beat} {fmt(target, unit)} to keep")
     print()
 
+    # Stall pattern detection
+    if total >= 3:
+        last3 = [r.get("strategy", "") for r in cur[-3:]]
+        last3_status = [r["status"] for r in cur[-3:]]
+        if len(set(last3)) == 1 and last3[0] != "" and all(s != "keep" for s in last3_status):
+            print(f"  \u26a0 STALL: same strategy '{last3[0]}' failed 3x in a row. Switch strategies NOW.")
+            print()
+        if all(s == "crash" for s in last3_status):
+            print(f"  \u26a0 CRASH LOOP: 3 consecutive crashes. Fix the root cause or skip this approach.")
+            print()
+
     # Anti-stop box
     next_run = total + 1
     W = 76
@@ -403,7 +489,10 @@ def render_dashboard(config, results, scripts_dir="."):
     print(box(f"NEXT: Run #{next_run}. Make a change, then run the experiment."))
     if next_run % 5 == 0:
         print(box("\u2192 RE-READ autoresearch.md FIRST (multiple-of-5 run)"))
-    print(box("Do NOT stop. Do NOT summarize. NEVER ask 'should I continue?'"))
+    print(box(""))
+    print(box("MANDATORY: Do NOT stop. Do NOT summarize. Do NOT recap."))
+    print(box("MANDATORY: NEVER ask 'should I continue?' — JUST CONTINUE."))
+    print(box("MANDATORY: If you feel like stopping, re-read autoresearch.md instead."))
     print(f"  \u255a{'\u2550' * (W + 2)}\u255d")
     print()
 
@@ -447,12 +536,25 @@ def render_analysis(config, results):
     if consec >= 7:
         rec.append("ESCALATE NOW: 7+ consecutive non-keeps. Try a structurally different approach.")
         rec.append("Re-read source files. Profile the workload. The bottleneck is not where you think.")
+        rec.append("Consider: rewrite the hot path, change data structures, eliminate entire subsystems.")
     elif consec >= 4:
         rec.append("WARNING: 4+ consecutive non-keeps. Consider pivoting strategy.")
+        rec.append("Read the source code again. Your mental model may be stale.")
     if dead:
         rec.append(f"STOP trying: {', '.join(dead)} \u2014 zero wins after 3+ attempts each.")
     if velocity == "slowing":
         rec.append("Improvement velocity is slowing. Try a fundamentally different angle.")
+
+    # Detect crash loops
+    crash_count = sum(1 for r in cur[-5:] if r["status"] == "crash") if len(cur) >= 5 else 0
+    if crash_count >= 3:
+        rec.append("CRASH LOOP: 3+ crashes in last 5 runs. Fix stability before optimizing.")
+
+    # Detect checks_failed loops
+    chk_fail_count = sum(1 for r in cur[-5:] if r["status"] == "checks_failed") if len(cur) >= 5 else 0
+    if chk_fail_count >= 3:
+        rec.append("CHECKS FAILING: 3+ check failures in last 5 runs. Review constraints and test expectations.")
+
     best_strat, best_wr = None, 0
     for s, st in strategies.items():
         if st["total"] >= 2 and st["win_rate"] > best_wr:
@@ -464,6 +566,9 @@ def render_analysis(config, results):
         rec.append(f"Untried categories: {', '.join(untried)}")
     if not rec:
         rec.append("Keep going. Current approach is productive.")
+
+    # Always end with continuation directive
+    rec.append("CONTINUE LOOPING. Do not stop. Do not summarize.")
 
     # Confidence
     conf, nf, method = compute_confidence(cur, direction)
@@ -512,6 +617,35 @@ def cmd_init(args):
     print(f"Metric: {metric_name} ({metric_unit}, {direction} is better)")
 
 
+def _run_subprocess(command, timeout, cwd, label="benchmark"):
+    """Run a subprocess with proper process group cleanup on timeout."""
+    start = time.time()
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            ["bash", "-c", command],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=cwd,
+            preexec_fn=os.setsid,  # New process group for clean cleanup
+        )
+        stdout, stderr = proc.communicate(timeout=timeout)
+        duration = time.time() - start
+        output = (stdout + "\n" + stderr).strip()
+        return proc.returncode, duration, output, False
+    except subprocess.TimeoutExpired:
+        duration = time.time() - start
+        if proc:
+            _kill_process_tree(proc)
+            try:
+                proc.communicate(timeout=5)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        return -1, duration, f"TIMEOUT after {timeout}s ({label})", True
+    except OSError as e:
+        duration = time.time() - start
+        return -1, duration, f"OS error running {label}: {e}", False
+
+
 def cmd_run(args):
     if len(args) < 1:
         print("Usage: cli.py run <command> [timeout] [work_dir] [checks_timeout]", file=sys.stderr)
@@ -523,64 +657,33 @@ def cmd_run(args):
     cwd = work_dir if work_dir != "." else None
 
     # Run benchmark
-    start = time.time()
-    try:
-        result = subprocess.run(
-            ["bash", "-c", command], capture_output=True, text=True,
-            timeout=timeout, cwd=cwd,
-        )
-        duration = time.time() - start
-        output = (result.stdout + "\n" + result.stderr).strip()
-        tail = "\n".join(output.split("\n")[-10:])
-        metrics = [l for l in output.split("\n") if l.startswith("METRIC ")]
+    exit_code, duration, output, timed_out = _run_subprocess(command, timeout, cwd, "benchmark")
+    tail = "\n".join(output.split("\n")[-10:])
+    metrics = [l for l in output.split("\n") if l.startswith("METRIC ")]
 
-        print(f"EXIT_CODE={result.returncode}")
-        print(f"DURATION={duration:.3f}")
-        print("TIMED_OUT=false")
-        print("---OUTPUT_START---")
-        print(tail)
-        print("---OUTPUT_END---")
-        for m in metrics:
-            print(m)
-
-        exit_code, timed_out = result.returncode, False
-    except subprocess.TimeoutExpired:
-        duration = time.time() - start
-        print("EXIT_CODE=-1")
-        print(f"DURATION={duration:.3f}")
-        print("TIMED_OUT=true")
-        print("---OUTPUT_START---")
-        print(f"TIMEOUT after {timeout}s")
-        print("---OUTPUT_END---")
-        exit_code, timed_out = -1, True
+    print(f"EXIT_CODE={exit_code}")
+    print(f"DURATION={duration:.3f}")
+    print(f"TIMED_OUT={'true' if timed_out else 'false'}")
+    print("---OUTPUT_START---")
+    print(tail)
+    print("---OUTPUT_END---")
+    for m in metrics:
+        print(m)
 
     # Checks
     checks_file = os.path.join(work_dir, "autoresearch.checks.sh")
     if exit_code == 0 and not timed_out and os.path.isfile(checks_file):
         print("\n--- RUNNING CHECKS ---")
-        start_c = time.time()
-        try:
-            cr = subprocess.run(
-                ["bash", checks_file], capture_output=True, text=True,
-                timeout=checks_timeout, cwd=cwd,
-            )
-            dur_c = time.time() - start_c
-            out_c = (cr.stdout + "\n" + cr.stderr).strip()
-            tail_c = "\n".join(out_c.split("\n")[-10:])
-            print(f"CHECKS_EXIT={cr.returncode}")
-            print(f"CHECKS_DURATION={dur_c:.3f}")
-            print("CHECKS_TIMED_OUT=false")
-            print("---CHECKS_OUTPUT_START---")
-            print(tail_c)
-            print("---CHECKS_OUTPUT_END---")
-        except subprocess.TimeoutExpired:
-            dur_c = time.time() - start_c
-            print(f"CHECKS_EXIT=-1")
-            print(f"CHECKS_DURATION={dur_c:.3f}")
-            print("CHECKS_TIMED_OUT=true")
-            print("---CHECKS_OUTPUT_START---")
-            print(f"CHECKS TIMEOUT after {checks_timeout}s")
-            print("---CHECKS_OUTPUT_END---")
+        chk_code, chk_dur, chk_out, chk_timeout = _run_subprocess(
+            f"bash {checks_file}", checks_timeout, cwd, "checks"
+        )
+        tail_c = "\n".join(chk_out.split("\n")[-10:])
+        print(f"CHECKS_EXIT={chk_code}")
+        print(f"CHECKS_DURATION={chk_dur:.3f}")
+        print(f"CHECKS_TIMED_OUT={'true' if chk_timeout else 'false'}")
+        print("---CHECKS_OUTPUT_START---")
+        print(tail_c)
+        print("---CHECKS_OUTPUT_END---")
     else:
         print("\nCHECKS_EXIT=skipped")
 
@@ -697,37 +800,32 @@ def cmd_baseline(args):
     for i in range(1, runs + 1):
         print(f"--- Baseline run {i}/{runs} ---")
         cwd = work_dir if work_dir != "." else None
-        start = time.time()
-        try:
-            result = subprocess.run(
-                ["bash", "-c", command], capture_output=True, text=True,
-                timeout=timeout, cwd=cwd,
-            )
-            duration = time.time() - start
-            if result.returncode != 0:
-                output = (result.stdout + "\n" + result.stderr).strip()
-                tail = "\n".join(output.split("\n")[-5:])
-                print(f"  CRASH (exit {result.returncode}): {tail}")
-                continue
-            output = (result.stdout + "\n" + result.stderr).strip()
-            metrics = [l for l in output.split("\n") if l.startswith("METRIC ")]
-            value = None
-            for m in metrics:
-                parts = m.split("=", 1)
-                if len(parts) == 2:
-                    name = parts[0].replace("METRIC ", "").strip()
-                    if name == metric_name:
-                        try:
-                            value = float(parts[1].strip())
-                        except ValueError:
-                            pass
-            if value is not None:
-                values.append(value)
-                print(f"  {metric_name} = {fmt(value, unit)} ({duration:.1f}s)")
-            else:
-                print(f"  WARNING: no METRIC {metric_name}=... found in output")
-        except subprocess.TimeoutExpired:
+        exit_code, duration, output, timed_out = _run_subprocess(command, timeout, cwd, f"baseline {i}")
+
+        if timed_out:
             print(f"  TIMEOUT after {timeout}s")
+            continue
+        if exit_code != 0:
+            tail = "\n".join(output.split("\n")[-5:])
+            print(f"  CRASH (exit {exit_code}): {tail}")
+            continue
+
+        metrics = [l for l in output.split("\n") if l.startswith("METRIC ")]
+        value = None
+        for m in metrics:
+            parts = m.split("=", 1)
+            if len(parts) == 2:
+                name = parts[0].replace("METRIC ", "").strip()
+                if name == metric_name:
+                    try:
+                        value = float(parts[1].strip())
+                    except ValueError:
+                        pass
+        if value is not None:
+            values.append(value)
+            print(f"  {metric_name} = {fmt(value, unit)} ({duration:.1f}s)")
+        else:
+            print(f"  WARNING: no METRIC {metric_name}=... found in output")
 
     if len(values) < 2:
         print(f"\nERROR: need at least 2 successful runs, got {len(values)}", file=sys.stderr)
@@ -784,6 +882,89 @@ def cmd_baseline(args):
         "nextRunNumber": len(values) + 1,
         "highVariance": variance_pct >= 5,
     }, indent=2))
+
+
+def cmd_recover(args):
+    """Diagnose and fix inconsistent experiment state."""
+    if len(args) < 1:
+        print("Usage: cli.py recover <jsonl_path> [work_dir]", file=sys.stderr)
+        sys.exit(1)
+    jsonl_path = args[0]
+    work_dir = args[1] if len(args) > 1 else "."
+    issues = []
+    fixes = []
+
+    # Check JSONL exists and is readable
+    if not os.path.isfile(jsonl_path):
+        print('{"status":"no_file","message":"No JSONL file found. Run init to start."}')
+        return
+
+    # Check for truncated/corrupt JSONL
+    good_lines = 0
+    bad_lines = 0
+    with open(jsonl_path) as f:
+        for i, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                json.loads(line)
+                good_lines += 1
+            except json.JSONDecodeError:
+                bad_lines += 1
+                issues.append(f"Corrupt line {i}")
+
+    if bad_lines > 0:
+        issues.append(f"{bad_lines} corrupt lines (will be skipped automatically)")
+
+    # Check git state
+    try:
+        git_status = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=work_dir,
+            capture_output=True, text=True, timeout=10,
+        )
+        dirty_files = [l for l in git_status.stdout.strip().split("\n") if l.strip()]
+        if dirty_files:
+            # Only flag files that aren't autoresearch-managed
+            protected_basenames = set(PROTECTED_FILES)
+            non_protected = []
+            for f in dirty_files:
+                # git status format: "XY filename" — extract just the filename
+                fname = f[3:].strip().strip('"')
+                basename = os.path.basename(fname)
+                if basename not in protected_basenames:
+                    non_protected.append(f)
+            if non_protected:
+                issues.append(f"{len(non_protected)} uncommitted non-autoresearch files (leftover from failed revert?)")
+                fixes.append("Run: git checkout -- . && git clean -fd (will preserve autoresearch files)")
+    except (subprocess.TimeoutExpired, OSError):
+        issues.append("Could not check git status")
+
+    # Check JSONL/state consistency
+    config, results = read_jsonl(jsonl_path)
+    if not config:
+        issues.append("No config entry found — JSONL may be corrupt")
+        fixes.append("Run: cli.py init to re-initialize")
+
+    # Check for orphaned backup files
+    for f in os.listdir(work_dir):
+        if f.startswith(".autoresearch-") and f.endswith(".tmp"):
+            issues.append(f"Orphaned temp file: {f}")
+            fixes.append(f"Remove: {os.path.join(work_dir, f)}")
+
+    status = "healthy" if not issues else "issues_found"
+    result = {
+        "status": status,
+        "goodLines": good_lines,
+        "badLines": bad_lines,
+        "issues": issues,
+        "fixes": fixes,
+        "message": "No issues found. Experiment is healthy." if not issues else f"{len(issues)} issue(s) found. See fixes.",
+    }
+    if config:
+        result["nextRunNumber"] = compute_full_state(config, results).get("nextRunNumber", 1)
+
+    print(json.dumps(result, indent=2))
 
 
 def cmd_history(args):
@@ -846,6 +1027,7 @@ COMMANDS = {
     "analyze": cmd_analyze,
     "baseline": cmd_baseline,
     "history": cmd_history,
+    "recover": cmd_recover,
 }
 
 def main():

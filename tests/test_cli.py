@@ -498,3 +498,87 @@ another corrupt line {{{
             f.write("")
         out = run_cli("dashboard", jp)
         assert "No experiments" in out
+
+
+# --- Recover subcommand ---
+
+class TestRecover:
+    def test_healthy_state(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        run_cli("init", "test", "duration", "s", "lower", jp)
+        out = json.loads(run_cli("recover", jp, test_dir))
+        assert out["status"] == "healthy"
+        assert out["badLines"] == 0
+
+    def test_corrupt_lines_detected(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write('{"type":"config","name":"t","metricName":"d","metricUnit":"s","bestDirection":"lower"}\n')
+            f.write("CORRUPT LINE\n")
+            f.write('{"run":1,"commit":"a","metric":10,"status":"keep","description":"b","segment":0}\n')
+        out = json.loads(run_cli("recover", jp, test_dir))
+        assert out["status"] == "issues_found"
+        assert out["badLines"] == 1
+        assert any("corrupt" in i.lower() or "Corrupt" in i for i in out["issues"])
+
+    def test_missing_file(self, test_dir):
+        jp = os.path.join(test_dir, "nonexistent.jsonl")
+        out = json.loads(run_cli("recover", jp, test_dir))
+        assert out["status"] == "no_file"
+
+    def test_next_run_number(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write('{"type":"config","name":"t","metricName":"d","metricUnit":"s","bestDirection":"lower"}\n')
+            f.write('{"run":1,"commit":"a","metric":10,"status":"keep","description":"b","segment":0}\n')
+            f.write('{"run":2,"commit":"b","metric":9,"status":"keep","description":"b","segment":0}\n')
+        out = json.loads(run_cli("recover", jp, test_dir))
+        assert out["nextRunNumber"] == 3
+
+
+# --- Stall detection in dashboard ---
+
+class TestStallDetection:
+    def test_same_strategy_stall(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write('{"type":"config","name":"t","metricName":"d","metricUnit":"s","bestDirection":"lower"}\n')
+            f.write('{"run":1,"commit":"a","metric":10,"status":"keep","description":"b","segment":0}\n')
+            f.write('{"run":2,"commit":"b","metric":11,"status":"discard","description":"b","segment":0,"strategy":"caching"}\n')
+            f.write('{"run":3,"commit":"c","metric":12,"status":"discard","description":"b","segment":0,"strategy":"caching"}\n')
+            f.write('{"run":4,"commit":"d","metric":11,"status":"discard","description":"b","segment":0,"strategy":"caching"}\n')
+        out = run_cli("dashboard", jp)
+        assert "STALL" in out
+
+    def test_crash_loop_warning(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write('{"type":"config","name":"t","metricName":"d","metricUnit":"s","bestDirection":"lower"}\n')
+            f.write('{"run":1,"commit":"a","metric":10,"status":"keep","description":"b","segment":0}\n')
+            f.write('{"run":2,"commit":"b","metric":0,"status":"crash","description":"b","segment":0}\n')
+            f.write('{"run":3,"commit":"c","metric":0,"status":"crash","description":"b","segment":0}\n')
+            f.write('{"run":4,"commit":"d","metric":0,"status":"crash","description":"b","segment":0}\n')
+        out = run_cli("dashboard", jp)
+        assert "CRASH LOOP" in out
+
+
+# --- Enhanced anti-stop in dashboard ---
+
+class TestAntiStopEnhanced:
+    def test_mandatory_continue_messages(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write('{"type":"config","name":"t","metricName":"d","metricUnit":"s","bestDirection":"lower"}\n')
+            f.write('{"run":1,"commit":"a","metric":10,"status":"keep","description":"b","segment":0}\n')
+        out = run_cli("dashboard", jp)
+        assert "MANDATORY" in out
+        assert "NEVER ask" in out
+
+    def test_analyze_continue_directive(self, test_dir):
+        jp = os.path.join(test_dir, "autoresearch.jsonl")
+        with open(jp, "w") as f:
+            f.write('{"type":"config","name":"t","metricName":"d","metricUnit":"s","bestDirection":"lower"}\n')
+            f.write('{"run":1,"commit":"a","metric":10,"status":"keep","description":"b","segment":0,"strategy":"algorithm"}\n')
+            f.write('{"run":2,"commit":"b","metric":9,"status":"keep","description":"b","segment":0,"strategy":"algorithm"}\n')
+        analysis = json.loads(run_cli("analyze", jp))
+        assert any("CONTINUE" in r or "continue" in r.lower() for r in analysis["recommendation"])

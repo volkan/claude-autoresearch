@@ -54,6 +54,7 @@ Single CLI at `scripts/cli.py` with subcommands — inspired by [pi-autoresearch
 | `cli.py dashboard` | Print ASCII dashboard with strategy column |
 | `cli.py analyze` | Strategy effectiveness analysis with recommendations |
 | `cli.py history` | Full experiment history (all runs, not truncated) |
+| `cli.py recover` | Diagnose and fix inconsistent state (corrupt JSONL, dirty git) |
 
 ## Running Tests
 
